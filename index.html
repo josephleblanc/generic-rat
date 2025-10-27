@@ -86,11 +86,14 @@
 
   // -------- File System Access API path --------
   async function* walkDir(dirHandle, prefixSegs = []) {
-    for await (const [name, handle] of dirHandle) {
+    // Use .values() for broader compatibility; some browsers may not
+    // support iterating the handle directly.
+    for await (const handle of dirHandle.values()) {
+      const name = handle.name || "";
       if (handle.kind === "directory") {
         if (shouldSkipDir(name, prefixSegs)) continue;
         yield* walkDir(handle, [...prefixSegs, name]);
-      } else {
+      } else if (handle.kind === "file") {
         if (shouldSkipFile(prefixSegs, name)) continue;
         const file = await handle.getFile();
         const buf  = await file.arrayBuffer();
@@ -102,10 +105,15 @@
 
   // Ask the user for a directory, read files (filtered) into memory
   window.pickRustCrate = async () => {
-    const dir = await window.showDirectoryPicker({ mode: "read" });
-    const out = [];
-    for await (const f of walkDir(dir, [])) out.push(f);
-    return out;
+    try {
+      const dir = await window.showDirectoryPicker({ mode: "read" });
+      const out = [];
+      for await (const f of walkDir(dir, [])) out.push(f);
+      return out;
+    } catch (e) {
+      console.error("pickRustCrate error:", e);
+      throw e;
+    }
   };
 
   // -------- Fallback: webkitdirectory file input --------
@@ -115,25 +123,35 @@
   input.hidden = true;
   document.body.appendChild(input);
 
-  window.pickRustCrateFallback = () => new Promise((resolve) => {
+  window.pickRustCrateFallback = () => new Promise((resolve, reject) => {
     input.onchange = async () => {
-      const out = [];
-      for (const file of input.files) {
-        // Derive path segments from webkitRelativePath (or name)
-        const rel = file.webkitRelativePath || file.name;
-        const segs = rel.split("/").filter(Boolean);
-        const name = segs[segs.length - 1] || "";
-        const parents = segs.slice(0, -1);
+      try {
+        const out = [];
+        for (const file of input.files) {
+          const rel = file.webkitRelativePath || file.name;
+          const segs = rel.split("/").filter(Boolean);
+          const name = segs[segs.length - 1] || "";
+          const parents = segs.slice(0, -1);
 
-        if (shouldSkipFile(parents, name)) continue;
+          if (shouldSkipFile(parents, name)) continue;
 
-        const buf = await file.arrayBuffer();
-        out.push({ path: rel, bytes: new Uint8Array(buf) });
+          const buf = await file.arrayBuffer();
+          out.push({ path: rel, bytes: new Uint8Array(buf) });
+        }
+        resolve(out);
+      } catch (e) {
+        console.error("pickRustCrateFallback error:", e);
+        reject(e);
+      } finally {
+        input.value = "";
       }
-      resolve(out);
-      input.value = "";
     };
-    input.click();
+    try {
+      input.click();
+    } catch (e) {
+      console.error("input.click() failed:", e);
+      reject(e);
+    }
   });
 
   // -------- Minimal ZIP export (unchanged) --------

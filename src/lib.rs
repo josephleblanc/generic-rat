@@ -31,6 +31,13 @@ fn main() -> Result<(), JsError> {
 
     let event_state = Rc::clone(&state);
     terminal.on_key_event(move |key_event| {
+        // Handle 'u' synchronously to preserve the user-gesture requirement
+        if matches!(key_event.code, KeyCode::Char('u')) {
+            let state_for_cb = event_state.clone();
+            start_pick_and_mount(state_for_cb);
+            return;
+        }
+
         let event_state = event_state.clone();
         wasm_bindgen_futures::spawn_local(async move {
             event_state.handle_events(key_event).await;
@@ -70,24 +77,27 @@ impl App {
         }
     }
     fn rebuild_previews(&self) {
-        let mut previews = self.previews.borrow_mut();
-        previews.clear();
+        // Build previews while holding a single mutable borrow
+        let mut previews_ref = self.previews.borrow_mut();
+        previews_ref.clear();
+
         if let Some(vfs) = &*self.vfs.borrow() {
             for path in vfs.list() {
                 let bytes = vfs.read(&path).unwrap_or_default();
                 let s = String::from_utf8_lossy(&bytes).replace('\n', " ");
                 let short = s.chars().take(30).collect::<String>();
-                previews.push(FilePreview {
+                previews_ref.push(FilePreview {
                     path,
                     preview: short,
                 });
             }
         }
+
+        // Use the current length without re-borrowing self.previews
         if self.vfs.borrow().is_some() {
-            self.status.replace(format!(
-                "Loaded {} files. Press E to export.",
-                self.previews.borrow().len()
-            ));
+            let count = previews_ref.len();
+            self.status
+                .replace(format!("Loaded {} files. Press E to export.", count));
         }
     }
     fn render(&self, frame: &mut Frame) {
@@ -238,7 +248,7 @@ impl Vfs for InMemoryVfs {
     }
 }
 
-use js_sys::{Array, Uint8Array};
+use js_sys::{Array, Promise, Uint8Array};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 
@@ -249,6 +259,13 @@ extern "C" {
 
     #[wasm_bindgen(js_namespace = window, js_name = pickRustCrateFallback)]
     async fn pick_rust_crate_fallback() -> JsValue;
+
+    // Promise-returning variants to invoke synchronously from a key event
+    #[wasm_bindgen(js_namespace = window, js_name = pickRustCrate)]
+    fn pick_rust_crate_promise() -> Promise;
+
+    #[wasm_bindgen(js_namespace = window, js_name = pickRustCrateFallback)]
+    fn pick_rust_crate_fallback_promise() -> Promise;
 
     #[wasm_bindgen(js_namespace = window, js_name = downloadAsZip)]
     fn download_as_zip(files: JsValue);
@@ -272,17 +289,7 @@ async fn gather_files() -> Result<Vec<FileEntry>, JsValue> {
         pick_rust_crate_fallback().await
     };
 
-    let arr: Array = js.dyn_into()?;
-    let mut out = Vec::with_capacity(arr.length() as usize);
-    for v in arr.iter() {
-        let path = js_sys::Reflect::get(&v, &JsValue::from_str("path"))?
-            .as_string()
-            .unwrap_or_default();
-        let bytes = js_sys::Reflect::get(&v, &JsValue::from_str("bytes"))?;
-        let bytes = Uint8Array::new(&bytes).to_vec();
-        out.push(FileEntry { path, bytes });
-    }
-    Ok(out)
+    parse_js_file_array(js)
 }
 
 pub async fn mount_picked_crate() -> Result<InMemoryVfs, JsValue> {
@@ -313,4 +320,61 @@ pub fn export_as_zip(vfs: &impl Vfs) -> Result<(), JsValue> {
 
     download_as_zip(files.into());
     Ok(())
+}
+
+// -------- Helpers for synchronous picker + parsing --------
+
+fn parse_js_file_array(js: JsValue) -> Result<Vec<FileEntry>, JsValue> {
+    let arr: Array = js.dyn_into()?;
+    let mut out = Vec::with_capacity(arr.length() as usize);
+    for v in arr.iter() {
+        let path = js_sys::Reflect::get(&v, &JsValue::from_str("path"))?
+            .as_string()
+            .unwrap_or_default();
+        let bytes = js_sys::Reflect::get(&v, &JsValue::from_str("bytes"))?;
+        let bytes = Uint8Array::new(&bytes).to_vec();
+        out.push(FileEntry { path, bytes });
+    }
+    Ok(out)
+}
+
+fn start_pick_and_mount(state: Rc<App>) {
+    let has_fs_api = web_sys::window()
+        .and_then(|w| js_sys::Reflect::get(&w, &JsValue::from_str("showDirectoryPicker")).ok())
+        .map(|v| v.is_function())
+        .unwrap_or(false);
+
+    let promise = if has_fs_api {
+        pick_rust_crate_promise()
+    } else {
+        pick_rust_crate_fallback_promise()
+    };
+
+    let fut = wasm_bindgen_futures::JsFuture::from(promise);
+    wasm_bindgen_futures::spawn_local(async move {
+        match fut.await {
+            Ok(js) => {
+                match parse_js_file_array(js) {
+                    Ok(files) => {
+                        let mut map = std::collections::BTreeMap::new();
+                        for f in files {
+                            map.insert(f.path, f.bytes);
+                        }
+                        state.vfs.replace(Some(InMemoryVfs { files: map }));
+                        state.rebuild_previews();
+                    }
+                    Err(e) => {
+                        state
+                            .status
+                            .replace(format!("Failed to parse selected files: {:?}", e));
+                    }
+                }
+            }
+            Err(e) => {
+                state
+                    .status
+                    .replace(format!("Failed to load crate: {:?}", e));
+            }
+        }
+    });
 }
