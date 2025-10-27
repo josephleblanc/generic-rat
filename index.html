@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, user-scalable=no"
+    />
+    <link
+      rel="stylesheet"
+      href="https://cdnjs.cloudflare.com/ajax/libs/firacode/6.2.0/fira_code.min.css"
+    />
+    <!-- Copy our sample into the build output so it's fetchable at runtime -->
+    <link data-trunk rel="copy-dir" href="assets" data-target-path="assets/" />
+    <title>generic-rat</title>
+    <style>
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100vh;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        align-items: center;
+        align-content: center;
+        background-color: #121212;
+      }
+      pre {
+        font-family: "Fira Code", monospace;
+        font-size: 16px;
+        margin: 0px;
+      }
+    </style>
+  </head>
+  <body>
+  </body>
+</html>
+
+<script type="module">
+  // Denylist of directory names to skip at ANY depth
+  const IGNORE_DIRS = new Set([
+    ".git", ".github", ".idea", ".vscode", ".cache",
+    "target", "dist", "build", "out", "node_modules"
+  ]);
+
+  // Optional: skip hidden files (dotfiles) and obvious binary blobs.
+  // Tweak as you like.
+  const SKIP_HIDDEN_FILES = true;
+  const SKIP_BINARY_EXTS = new Set([
+    "png","jpg","jpeg","gif","webp","ico","bmp","pdf","zip","tar","gz","7z",
+    "wasm","node","exe","dll","so","dylib","class","jar","bin","lock"
+  ]);
+
+  function isHidden(name) {
+    return name.startsWith(".");
+  }
+
+  function hasBinaryExt(name) {
+    const i = name.lastIndexOf(".");
+    if (i <= 0) return false;
+    const ext = name.slice(i+1).toLowerCase();
+    return SKIP_BINARY_EXTS.has(ext);
+  }
+
+  function shouldSkipFile(pathSegments, fileName) {
+    if (SKIP_HIDDEN_FILES && isHidden(fileName)) return true;
+    if (hasBinaryExt(fileName)) return true;
+    // Skip if ANY parent segment is in the ignore set
+    for (const seg of pathSegments) {
+      if (IGNORE_DIRS.has(seg)) return true;
+      if (SKIP_HIDDEN_FILES && isHidden(seg)) return true;
+    }
+    return false;
+  }
+
+  function shouldSkipDir(dirName, pathSegments) {
+    if (IGNORE_DIRS.has(dirName)) return true;
+    if (SKIP_HIDDEN_FILES && isHidden(dirName)) return true;
+    // Also skip if any parent already ignored
+    for (const seg of pathSegments) {
+      if (IGNORE_DIRS.has(seg)) return true;
+      if (SKIP_HIDDEN_FILES && isHidden(seg)) return true;
+    }
+    return false;
+  }
+
+  // -------- File System Access API path --------
+  async function* walkDir(dirHandle, prefixSegs = []) {
+    for await (const [name, handle] of dirHandle) {
+      if (handle.kind === "directory") {
+        if (shouldSkipDir(name, prefixSegs)) continue;
+        yield* walkDir(handle, [...prefixSegs, name]);
+      } else {
+        if (shouldSkipFile(prefixSegs, name)) continue;
+        const file = await handle.getFile();
+        const buf  = await file.arrayBuffer();
+        const rel  = [...prefixSegs, name].join("/");
+        yield { path: rel, bytes: new Uint8Array(buf) };
+      }
+    }
+  }
+
+  // Ask the user for a directory, read files (filtered) into memory
+  window.pickRustCrate = async () => {
+    const dir = await window.showDirectoryPicker({ mode: "read" });
+    const out = [];
+    for await (const f of walkDir(dir, [])) out.push(f);
+    return out;
+  };
+
+  // -------- Fallback: webkitdirectory file input --------
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.webkitdirectory = true;
+  input.hidden = true;
+  document.body.appendChild(input);
+
+  window.pickRustCrateFallback = () => new Promise((resolve) => {
+    input.onchange = async () => {
+      const out = [];
+      for (const file of input.files) {
+        // Derive path segments from webkitRelativePath (or name)
+        const rel = file.webkitRelativePath || file.name;
+        const segs = rel.split("/").filter(Boolean);
+        const name = segs[segs.length - 1] || "";
+        const parents = segs.slice(0, -1);
+
+        if (shouldSkipFile(parents, name)) continue;
+
+        const buf = await file.arrayBuffer();
+        out.push({ path: rel, bytes: new Uint8Array(buf) });
+      }
+      resolve(out);
+      input.value = "";
+    };
+    input.click();
+  });
+
+  // -------- Minimal ZIP export (unchanged) --------
+  function uint16LE(n){ const b=new Uint8Array(2); b[0]=n&255; b[1]=(n>>8)&255; return b;}
+  function uint32LE(n){ const b=new Uint8Array(4); b[0]=n&255; b[1]=(n>>8)&255; b[2]=(n>>16)&255; b[3]=(n>>24)&255; return b;}
+
+  window.downloadAsZip = (files /* array of {path, bytes: Uint8Array} */) => {
+    const localHeaders = [];
+    const centralHeaders = [];
+    const fileDatas = [];
+    let offset = 0;
+    const enc = new TextEncoder();
+
+    for (const {path, bytes} of files) {
+      const name = enc.encode(path);
+      const crc = (function crc32(a){let c=-1;for(let i=0;i<a.length;i++){let d=(c^a[i])&255;for(let j=0;j<8;j++)d=(d&1)?(3988292384^(d>>>1)):(d>>>1);c=(c>>>8)^d;}return (c^(-1))>>>0;})(bytes);
+      const lfh = new Uint8Array([0x50,0x4B,0x03,0x04, 20,0, 0,0, 0,0, 0,0, 0,0]);
+      const header = new Uint8Array(lfh.length + 4 + 4 + 4 + 2 + 2 + name.length);
+      header.set(lfh, 0);
+      header.set(uint32LE(crc), 14);
+      header.set(uint32LE(bytes.length), 18);
+      header.set(uint32LE(bytes.length), 22);
+      header.set(uint16LE(name.length), 26);
+      header.set(uint16LE(0), 28);
+      header.set(name, 30);
+
+      localHeaders.push(header);
+      fileDatas.push(bytes);
+
+      const cdh = new Uint8Array(46 + name.length);
+      cdh.set(new Uint8Array([0x50,0x4B,0x01,0x02, 20,0, 20,0, 0,0, 0,0, 0,0, 0,0]), 0);
+      cdh.set(uint32LE(crc), 16);
+      cdh.set(uint32LE(bytes.length), 20);
+      cdh.set(uint32LE(bytes.length), 24);
+      cdh.set(uint16LE(name.length), 28);
+      cdh.set(uint16LE(0), 30);
+      cdh.set(uint16LE(0), 32);
+      cdh.set(uint16LE(0), 34);
+      cdh.set(uint16LE(0), 36);
+      cdh.set(uint32LE(0), 38);
+      cdh.set(uint32LE(offset), 42);
+      cdh.set(name, 46);
+
+      centralHeaders.push(cdh);
+      offset += header.length + bytes.length;
+    }
+
+    const centralStart = offset;
+    const centralSize = centralHeaders.reduce((s,b)=>s+b.length,0);
+    const eocd = new Uint8Array([0x50,0x4B,0x05,0x06, 0,0, 0,0, ...uint16LE(centralHeaders.length), ...uint16LE(centralHeaders.length), ...uint32LE(centralSize), ...uint32LE(centralStart), 0,0]);
+
+    const totalSize =
+      localHeaders.reduce((s,b)=>s+b.length,0) +
+      fileDatas.reduce((s,b)=>s+b.length,0) +
+      centralSize + eocd.length;
+
+    const out = new Uint8Array(totalSize);
+    let p = 0;
+    for (let i=0;i<localHeaders.length;i++){ out.set(localHeaders[i], p); p += localHeaders[i].length; out.set(fileDatas[i], p); p += fileDatas[i].length; }
+    for (const c of centralHeaders){ out.set(c, p); p += c.length; }
+    out.set(eocd, p);
+
+    const blob = new Blob([out], {type: 'application/zip'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'crate.zip';
+    a.click();
+    setTimeout(()=>URL.revokeObjectURL(url), 10_000);
+  };
+</script>
