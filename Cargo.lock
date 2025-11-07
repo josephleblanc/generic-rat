@@ -40,9 +40,9 @@ dependencies = [
 
 [[package]]
 name = "beamterm-data"
-version = "0.1.1"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f5426715a90e525fe067fed3c668b56297f5943235d4d08ac4f0d0851107ab9b"
+checksum = "8e9440270ceba7fccbd5aab22ffba8abafd13b63d30bc42c417b622fcc9643d7"
 dependencies = [
  "compact_str 0.9.0",
  "miniz_oxide",
@@ -50,15 +50,17 @@ dependencies = [
 
 [[package]]
 name = "beamterm-renderer"
-version = "0.1.1"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9678ebf9df1e5102cca065f991f8ecd486c65184372d94aa94131eff228dc1d7"
+checksum = "100e6159f2cd12ca83f89adaa812966d221616510c0a09afd4e1ea8e0f704bfb"
 dependencies = [
  "beamterm-data",
  "compact_str 0.9.0",
  "console_error_panic_hook",
  "js-sys",
  "thiserror 2.0.17",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
  "web-sys",
 ]
 
@@ -588,9 +590,9 @@ dependencies = [
 
 [[package]]
 name = "ratzilla"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "17de0f4d702010b67f8e2f76a7b3c28de71b7437a699dcbba3226338ab41fe5a"
+checksum = "958f4bf83094f5e2cce7f8d90a853f76d7254b6763d25b9cdfe11d0e76e16522"
 dependencies = [
  "beamterm-renderer",
  "bitvec",
