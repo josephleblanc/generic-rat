@@ -1,5 +1,20 @@
 Title: Folder Upload (U hotkey) — Root Cause and Fix
 
+SOLUTION:
+
+Good catch — your new symptom matches a runtime panic. Root cause is a RefCell
+double-borrow in the Rust UI update, which panics after the folder selection
+completes, so further key handling stops.
+
+Root Cause
+
+- In App::rebuild_previews, we held a mutable borrow of self.previews and then borrowed it again immutably to compute its length for the status line:
+    - let mut previews = self.previews.borrow_mut(); ...
+    - later: self.previews.borrow().len()
+- This triggers a RefCell runtime panic: already borrowed mutably. After pressing u, when rebuild_previews runs, this panic halts the app’s event handling, which is why left/right stop working.
+
+---
+
 Summary
 - Problem: Pressing `u` should let the user pick a local folder and preview its files in-memory, but selection was failing.
 - Root cause: The directory picker (and `input.click()` fallback) must be invoked inside an active user gesture. Our code launched the pickers from an async task spawned after the key event returned, losing the user-gesture context.
